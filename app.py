@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
 
 st.set_page_config(page_title="굿윌 매출 리포트", page_icon="📈", layout="wide")
 
@@ -30,9 +31,22 @@ DONOR_PATTERNS = {
 }
 CATEGORY_ORDER = ["의류","잡화","생활","식품","건강/미용","문화","원가상품","기타"]
 
-# -----------------------------
-# Utility
-# -----------------------------
+# style
+TITLE_FILL = PatternFill("solid", fgColor="1F1F1F")
+SECTION_FILL = PatternFill("solid", fgColor="D9E2F3")
+HEADER_FILL = PatternFill("solid", fgColor="E2F0D9")
+HEADER_BLUE = PatternFill("solid", fgColor="DDEBF7")
+HEADER_YELLOW = PatternFill("solid", fgColor="FFF2CC")
+TOTAL_FILL = PatternFill("solid", fgColor="FCE4D6")
+WHITE_FONT = Font(color="FFFFFF", bold=True, size=14)
+BOLD_FONT = Font(bold=True)
+RED_FONT = Font(color="C00000", bold=True)
+BLUE_FONT = Font(color="1F4E78", bold=True)
+THIN = Side(style="thin", color="BFBFBF")
+BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+CENTER = Alignment(horizontal="center", vertical="center")
+LEFT = Alignment(horizontal="left", vertical="center")
+
 def clean_number(x):
     if pd.isna(x):
         return 0.0
@@ -70,22 +84,63 @@ def month_label(month_str: str) -> str:
     y, m = month_str.split("-")
     return f"{y}년 {int(m)}월"
 
-# -----------------------------
-# Parsing
-# -----------------------------
+def auto_fit(ws, min_width=9, max_width=24):
+    for col_cells in ws.columns:
+        length = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for cell in col_cells:
+            val = "" if cell.value is None else str(cell.value)
+            length = max(length, len(val))
+        ws.column_dimensions[col_letter].width = max(min(length + 2, max_width), min_width)
+
+def style_title(ws, row, end_col, title):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
+    c = ws.cell(row=row, column=1, value=title)
+    c.fill = TITLE_FILL
+    c.font = WHITE_FONT
+    c.alignment = CENTER
+
+def style_section(ws, row, end_col, title, fill=SECTION_FILL):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
+    c = ws.cell(row=row, column=1, value=title)
+    c.fill = fill
+    c.font = BOLD_FONT
+    c.alignment = LEFT
+
+def apply_table_style(ws, start_row, end_row, start_col=1, end_col=None, header_fill=HEADER_FILL,
+                      pct_cols=None, won_cols=None, int_cols=None):
+    end_col = end_col or ws.max_column
+    pct_cols = pct_cols or []
+    won_cols = won_cols or []
+    int_cols = int_cols or []
+    for r in range(start_row, end_row + 1):
+        for c in range(start_col, end_col + 1):
+            cell = ws.cell(r, c)
+            cell.border = BORDER
+            if r == start_row:
+                cell.fill = header_fill
+                cell.font = BOLD_FONT
+                cell.alignment = CENTER
+            else:
+                cell.alignment = CENTER if c > 1 else LEFT
+                if c in pct_cols:
+                    cell.number_format = '0.0%'
+                elif c in won_cols:
+                    cell.number_format = '#,##0'
+                elif c in int_cols:
+                    cell.number_format = '#,##0'
+
 def parse_daily_sales(uploaded_file):
     raw = pd.read_excel(uploaded_file, sheet_name=0)
     raw = raw.rename(columns=lambda x: str(x).strip())
     store_col = raw.columns[0]
     current_store = None
     rows = []
-
     for _, row in raw.iterrows():
         marker = row.get(store_col)
         if isinstance(marker, str) and "매장:" in marker:
             current_store = re.sub(r".*매장:\s*", "", marker).split("[")[0].strip().replace("밀알","")
             continue
-
         sale_date = row.get("영업일자")
         if pd.isna(sale_date):
             continue
@@ -93,12 +148,10 @@ def parse_daily_sales(uploaded_file):
             sale_date = pd.to_datetime(sale_date)
         except Exception:
             continue
-
         out = {"지점명": current_store if current_store else "미확인", "영업일자": sale_date, "기준월": sale_date.strftime("%Y-%m")}
         for col in DAILY_NUM_COLS:
             out[col] = clean_number(row.get(col))
         rows.append(out)
-
     df = pd.DataFrame(rows)
     if not df.empty:
         df["일"] = df["영업일자"].dt.day
@@ -128,7 +181,6 @@ def parse_product_sales(uploaded_file):
     month_str = extract_month_from_filename(uploaded_file.name)
     if not month_str:
         raise ValueError(f"상품별 파일명에서 월을 읽을 수 없습니다: {uploaded_file.name}")
-
     category_hint = None
     rows = []
     for _, row in raw.iterrows():
@@ -136,12 +188,10 @@ def parse_product_sales(uploaded_file):
         if isinstance(left, str) and "상품분류1:" in left:
             category_hint = re.sub(r".*상품분류1:\s*", "", left).split("[")[0].strip()
             continue
-
         store = row.get("Unnamed: 1")
         product = row.get("상품")
         if pd.isna(store) or pd.isna(product):
             continue
-
         category = str(row.get("상품분류")).strip() if not pd.isna(row.get("상품분류")) else (category_hint or "미분류")
         out = {
             "기준월": month_str,
@@ -152,7 +202,6 @@ def parse_product_sales(uploaded_file):
         for col in PRODUCT_NUM_COLS:
             out[col] = clean_number(row.get(col))
         rows.append(out)
-
     df = pd.DataFrame(rows)
     if not df.empty:
         df["대분류"] = df["상품분류"].astype(str).str.split("》").str[0].str.strip()
@@ -165,9 +214,6 @@ def load_all_data(daily_files, product_files):
     product = pd.concat([parse_product_sales(f) for f in product_files], ignore_index=True) if product_files else pd.DataFrame()
     return daily, product
 
-# -----------------------------
-# Aggregations
-# -----------------------------
 def build_month_store_summary(daily):
     if daily.empty:
         return pd.DataFrame()
@@ -209,7 +255,6 @@ def build_donor_report(product_month):
         return pd.DataFrame()
     grp = product_month.groupby(["지점명","기증처"], as_index=False).agg({"판매수량":"sum","실매출액":"sum"})
     grp["피스단가"] = grp.apply(lambda r: pct(r["실매출액"], r["판매수량"]) if r["판매수량"] else 0, axis=1)
-
     base = grp[grp["기증처"].isin(MAJOR_DONORS)].copy()
     extra = (
         grp[~grp["기증처"].isin(MAJOR_DONORS)]
@@ -219,235 +264,161 @@ def build_donor_report(product_month):
     )
     extra_names = extra["기증처"].tolist()
     extra_df = grp[grp["기증처"].isin(extra_names)].copy()
-
     out = pd.concat([base, extra_df], ignore_index=True)
     total_order = out.groupby("기증처", as_index=False)["실매출액"].sum().sort_values("실매출액", ascending=False)["기증처"].tolist()
     out["기증처"] = pd.Categorical(out["기증처"], categories=total_order, ordered=True)
     return out.sort_values(["기증처","지점명"])
 
-# -----------------------------
-# Excel styling helpers
-# -----------------------------
-TITLE_FILL = PatternFill("solid", fgColor="1F1F1F")
-SECTION_FILL = PatternFill("solid", fgColor="D9E2F3")
-HEADER_FILL = PatternFill("solid", fgColor="EDEDED")
-SUBHEADER_FILL = PatternFill("solid", fgColor="F7F7F7")
-TOTAL_FILL = PatternFill("solid", fgColor="FFF2CC")
-WHITE_FONT = Font(color="FFFFFF", bold=True, size=14)
-BOLD_FONT = Font(bold=True)
-THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-CENTER = Alignment(horizontal="center", vertical="center")
-LEFT = Alignment(horizontal="left", vertical="center")
-
-def auto_fit(ws, min_width=10, max_width=22):
-    for col_cells in ws.columns:
-        length = 0
-        col_letter = get_column_letter(col_cells[0].column)
-        for cell in col_cells:
-            val = "" if cell.value is None else str(cell.value)
-            length = max(length, len(val))
-        ws.column_dimensions[col_letter].width = max(min(length + 2, max_width), min_width)
-
-def style_title(ws, row, end_col, title):
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
-    c = ws.cell(row=row, column=1, value=title)
-    c.fill = TITLE_FILL
-    c.font = WHITE_FONT
-    c.alignment = CENTER
-    ws.row_dimensions[row].height = 24
-
-def style_section(ws, row, end_col, title):
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
-    c = ws.cell(row=row, column=1, value=title)
-    c.fill = SECTION_FILL
-    c.font = Font(bold=True, size=11)
-    c.alignment = LEFT
-
-def apply_table_style(ws, start_row, end_row, start_col=1, header_rows=1, pct_cols=None, won_cols=None, int_cols=None):
-    pct_cols = pct_cols or []
-    won_cols = won_cols or []
-    int_cols = int_cols or []
-    for r in range(start_row, end_row + 1):
-        for c in range(start_col, ws.max_column + 1):
-            cell = ws.cell(r, c)
-            cell.border = BORDER
-            if r < start_row + header_rows:
-                cell.fill = HEADER_FILL
-                cell.font = BOLD_FONT
-                cell.alignment = CENTER
-            else:
-                cell.alignment = CENTER if c > 1 else LEFT
-            if c in pct_cols and r >= start_row + header_rows:
-                cell.number_format = '0.0%'
-            elif c in won_cols and r >= start_row + header_rows:
-                cell.number_format = '#,##0"원"'
-            elif c in int_cols and r >= start_row + header_rows:
-                cell.number_format = '#,##0'
-    for c in range(start_col, ws.max_column + 1):
-        ws.cell(start_row, c).fill = HEADER_FILL
-        ws.cell(start_row, c).font = BOLD_FONT
-
-def add_total_row(df, key_col, numeric_cols, label="합계"):
-    if df.empty:
-        return df
-    row = {key_col: label}
-    for col in df.columns:
-        if col == key_col:
+def build_same_month_last_year(current_df):
+    if current_df.empty:
+        return pd.DataFrame()
+    months = current_df["기준월"].dropna().unique().tolist()
+    result = []
+    for month in months:
+        y, m = month.split("-")
+        prev = f"{int(y)-1:04d}-{m}"
+        curr = current_df[current_df["기준월"] == month].copy()
+        prev_df = current_df[current_df["기준월"] == prev].copy()
+        if curr.empty:
             continue
-        row[col] = df[col].sum() if col in numeric_cols else ""
-    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        curr = curr.rename(columns={"판매수량":"판매수량_당해","실매출액":"실매출액_당해","점유율":"점유율_당해"})
+        prev_df = prev_df.rename(columns={"판매수량":"판매수량_전년","실매출액":"실매출액_전년","점유율":"점유율_전년"})
+        merged = curr.merge(prev_df[["지점명","분류그룹","판매수량_전년","실매출액_전년","점유율_전년"]],
+                            on=["지점명","분류그룹"], how="left")
+        merged["기준월"] = month
+        result.append(merged)
+    return pd.concat(result, ignore_index=True) if result else pd.DataFrame()
 
-def build_report_matrix(class_df, donor_df):
-    class_matrix = pd.DataFrame()
-    donor_matrix = pd.DataFrame()
+def monthly_overview_table(month_store, month):
+    sub = month_store[month_store["기준월"] == month].copy().sort_values("실매출액", ascending=False)
+    sub["전년대비"] = sub["전월대비증감률"]
+    sub["전년매출"] = sub["전월실매출액"].fillna(0)
+    sub["영업일수"] = np.nan
+    sub["일평균매출"] = np.nan
+    cols = ["지점명","실매출액","전표건수","객단가","전년대비","전년매출","영업일수","일평균매출"]
+    out = sub[cols].copy()
+    out.columns = ["매장","총매출","영수건수","객단가","전년대비","전년매출","영업일수","일평균 매출"]
+    return out
 
-    if not class_df.empty:
-        stores = sorted(class_df["지점명"].unique().tolist())
-        rows = []
-        for cat in CATEGORY_ORDER:
-            row = {"구분": cat}
-            for store in stores:
-                sub = class_df[(class_df["지점명"] == store) & (class_df["분류그룹"] == cat)]
-                qty = float(sub["판매수량"].sum()) if not sub.empty else 0
-                sales = float(sub["실매출액"].sum()) if not sub.empty else 0
-                total_sales = float(class_df[class_df["지점명"] == store]["실매출액"].sum()) if store in class_df["지점명"].values else 0
-                share = pct(sales, total_sales)
-                row[f"{store}_수량"] = qty
-                row[f"{store}_금액"] = sales
-                row[f"{store}_점유율"] = share
-            rows.append(row)
-        class_matrix = pd.DataFrame(rows)
+def category_yoy_table(product_df, month):
+    current = build_classification_report(product_df[product_df["기준월"] == month].copy())
+    if current.empty:
+        return pd.DataFrame()
+    current_total = current.groupby("분류그룹", as_index=False).agg({"판매수량":"sum","실매출액":"sum"})
+    current_total["점유율"] = current_total["실매출액"] / current_total["실매출액"].sum() if current_total["실매출액"].sum() else 0
 
-    if not donor_df.empty:
-        donors = donor_df["기증처"].astype(str).drop_duplicates().tolist()
-        stores = sorted(donor_df["지점명"].unique().tolist())
-        rows = []
-        for donor in donors:
-            row = {"구분": donor}
-            for store in stores:
-                sub = donor_df[(donor_df["지점명"] == store) & (donor_df["기증처"].astype(str) == donor)]
-                qty = float(sub["판매수량"].sum()) if not sub.empty else 0
-                sales = float(sub["실매출액"].sum()) if not sub.empty else 0
-                piece = pct(sales, qty) if qty else 0
-                row[f"{store}_수량"] = qty
-                row[f"{store}_금액"] = sales
-                row[f"{store}_피스단가"] = piece
-            rows.append(row)
-        donor_matrix = pd.DataFrame(rows)
+    y, m = month.split("-")
+    prev_month = f"{int(y)-1:04d}-{m}"
+    prev = build_classification_report(product_df[product_df["기준월"] == prev_month].copy())
+    prev_total = prev.groupby("분류그룹", as_index=False).agg({"판매수량":"sum","실매출액":"sum"}) if not prev.empty else pd.DataFrame(columns=["분류그룹","판매수량","실매출액"])
+    if not prev_total.empty:
+        prev_total["점유율"] = prev_total["실매출액"] / prev_total["실매출액"].sum() if prev_total["실매출액"].sum() else 0
 
-    return class_matrix, donor_matrix
+    merged = current_total.merge(prev_total, on="분류그룹", how="outer", suffixes=("_당해","_전년")).fillna(0)
+    merged["판매수량_차이"] = merged["판매수량_당해"] - merged["판매수량_전년"]
+    merged["실매출액_차이"] = merged["실매출액_당해"] - merged["실매출액_전년"]
+    merged["점유율_차이"] = merged["점유율_당해"] - merged["점유율_전년"]
+    merged = merged.rename(columns={"분류그룹":"구분"})
+    merged["정렬"] = merged["구분"].apply(lambda x: CATEGORY_ORDER.index(x) if x in CATEGORY_ORDER else 999)
+    return merged.sort_values("정렬").drop(columns=["정렬"])
 
-# -----------------------------
-# Excel generators (styled)
-# -----------------------------
-def make_designed_month_analysis(product_df):
+def receipt_comparison_table(month_store, month):
+    y, m = month.split("-")
+    prev = f"{int(y)-1:04d}-{m}"
+    curr = month_store[month_store["기준월"] == month].copy()
+    prev_df = month_store[month_store["기준월"] == prev].copy()
+    merged = curr.merge(prev_df[["지점명","실매출액","전표건수","객단가"]], on="지점명", how="left", suffixes=("_당해","_전년"))
+    merged["연도"] = int(y)
+    merged["영수건수 증가수"] = merged["전표건수_당해"] - merged["전표건수_전년"].fillna(0)
+    out = merged[["지점명","실매출액_당해","전표건수_당해","객단가_당해","연도","영수건수 증가수"]].copy()
+    out.columns = ["매장","총매출","영수건수","객단가","연도","영수건수 증가수"]
+    return out.sort_values("총매출", ascending=False)
+
+def payment_mix_table(daily_month):
+    cols = ["현금","현금영수증","카드","포인트","현금카드외","제휴포인트","상품권결제"]
+    s = daily_month[cols].sum().reset_index()
+    s.columns = ["결제수단","금액"]
+    s = s[s["금액"] > 0].sort_values("금액", ascending=False)
+    total = s["금액"].sum()
+    s["점유율"] = s["금액"] / total if total else 0
+    return s
+
+def top_bottom_stores_table(month_store, month, n=5):
+    sub = month_store[month_store["기준월"] == month].copy()
+    top = sub.nlargest(n, "실매출액")[["지점명","실매출액","전표건수","객단가"]]
+    bottom = sub.nsmallest(n, "실매출액")[["지점명","실매출액","전표건수","객단가"]]
+    return top, bottom
+
+def make_report_book(product_df, daily_df):
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        if product_df.empty:
-            pd.DataFrame({"안내":["상품별 파일 업로드 후 생성 가능합니다."]}).to_excel(writer, sheet_name="안내", index=False)
-        else:
-            for month in sorted(product_df["기준월"].unique().tolist()):
-                ws_name = f"{int(month.split('-')[1])}월"
-                pm = product_df[product_df["기준월"] == month].copy()
-                class_df = build_classification_report(pm)
-                donor_df = build_donor_report(pm)
-                class_matrix, donor_matrix = build_report_matrix(class_df, donor_df)
+        month_store = build_month_store_summary(daily_df)
+        months = sorted(month_store["기준월"].unique().tolist())
 
-                class_matrix = add_total_row(
-                    class_matrix, "구분",
-                    [c for c in class_matrix.columns if c.endswith("_수량") or c.endswith("_금액")]
-                ) if not class_matrix.empty else class_matrix
+        # reference sheet with image
+        pd.DataFrame({"안내":["참고 양식 이미지"]}).to_excel(writer, sheet_name="참고양식", index=False)
+        ws_ref = writer.book["참고양식"]
+        style_title(ws_ref, 1, 6, "사용자 제공 참고 이미지")
+        img_path = Path(__file__).parent / "sample_layout.png"
+        if img_path.exists():
+            img = XLImage(str(img_path))
+            img.width = 900
+            img.height = 1400
+            ws_ref.add_image(img, "A3")
 
-                donor_matrix = add_total_row(
-                    donor_matrix, "구분",
-                    [c for c in donor_matrix.columns if c.endswith("_수량") or c.endswith("_금액")]
-                ) if not donor_matrix.empty else donor_matrix
+        if not months:
+            out.seek(0)
+            return out.getvalue()
 
-                row = 1
-                if class_matrix.empty and donor_matrix.empty:
-                    pd.DataFrame({"안내":["해당 월의 상품 데이터가 없습니다."]}).to_excel(writer, sheet_name=ws_name, index=False)
-                    continue
+        latest = months[-1]
+        overview = monthly_overview_table(month_store, latest)
+        category_yoy = category_yoy_table(product_df, latest)
+        receipt_cmp = receipt_comparison_table(month_store, latest)
+        payment_mix = payment_mix_table(daily_df[daily_df["기준월"] == latest].copy())
+        top5, bottom5 = top_bottom_stores_table(month_store, latest)
 
-                # write class
-                if not class_matrix.empty:
-                    class_matrix.to_excel(writer, sheet_name=ws_name, index=False, startrow=row+2)
-                    ws = writer.book[ws_name]
-                    style_title(ws, row, len(class_matrix.columns), f"{month_label(month)} 월매출 분석자료")
-                    style_section(ws, row+2, len(class_matrix.columns), "분류별 매출 현황")
-                    start = row+3
-                    end = start + len(class_matrix)
-                    pct_cols = [i+1 for i, col in enumerate(class_matrix.columns) if col.endswith("_점유율")]
-                    won_cols = [i+1 for i, col in enumerate(class_matrix.columns) if col.endswith("_금액")]
-                    int_cols = [i+1 for i, col in enumerate(class_matrix.columns) if col.endswith("_수량")]
-                    apply_table_style(ws, start, end, pct_cols=pct_cols, won_cols=won_cols, int_cols=int_cols)
-                    # total row highlight
-                    for c in range(1, ws.max_column+1):
-                        ws.cell(end, c).fill = TOTAL_FILL
-                        ws.cell(end, c).font = BOLD_FONT
-                    row = end + 3
+        # 요약대시보드
+        overview.to_excel(writer, sheet_name="요약대시보드", index=False, startrow=2)
+        ws = writer.book["요약대시보드"]
+        style_title(ws, 1, max(8, overview.shape[1]), f"{month_label(latest)} 요약대시보드")
+        apply_table_style(ws, 3, 3 + len(overview), won_cols=[2,4,6,8], int_cols=[3])
+        auto_fit(ws)
+        ws.freeze_panes = "A4"
 
-                # write donor
-                if not donor_matrix.empty:
-                    donor_matrix.to_excel(writer, sheet_name=ws_name, index=False, startrow=row+1)
-                    ws = writer.book[ws_name]
-                    style_section(ws, row, len(donor_matrix.columns), "주요 기증처별 매출 현황")
-                    start = row+1
-                    end = start + len(donor_matrix)
-                    won_cols = [i+1 for i, col in enumerate(donor_matrix.columns) if col.endswith("_금액") or col.endswith("_피스단가")]
-                    int_cols = [i+1 for i, col in enumerate(donor_matrix.columns) if col.endswith("_수량")]
-                    apply_table_style(ws, start, end, won_cols=won_cols, int_cols=int_cols)
-                    for c in range(1, ws.max_column+1):
-                        ws.cell(end, c).fill = TOTAL_FILL
-                        ws.cell(end, c).font = BOLD_FONT
-
-                    auto_fit(ws)
-                    ws.freeze_panes = "B4"
-    out.seek(0)
-    return out.getvalue()
-
-def make_designed_goodwill_sales(daily_df):
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        if daily_df.empty:
-            pd.DataFrame({"안내":["매출현황 파일 업로드 후 생성 가능합니다."]}).to_excel(writer, sheet_name="안내", index=False)
-        else:
-            month_store = build_month_store_summary(daily_df)
-            summary = month_store.pivot_table(index="지점명", columns="기준월", values="실매출액", aggfunc="sum", fill_value=0).reset_index()
-            summary["합계"] = summary.drop(columns=["지점명"]).sum(axis=1)
-
-            summary.to_excel(writer, sheet_name="월합계", index=False, startrow=2)
-            ws = writer.book["월합계"]
-            style_title(ws, 1, len(summary.columns), "굿윌 매출자료 월합계")
-            apply_table_style(
-                ws, 3, 3 + len(summary),
-                won_cols=list(range(2, len(summary.columns)+1))
-            )
-            total_row_idx = 3 + len(summary)
-            for c in range(1, ws.max_column+1):
-                ws.cell(total_row_idx, c).fill = TOTAL_FILL
-                ws.cell(total_row_idx, c).font = BOLD_FONT
+        # category yoy
+        if not category_yoy.empty:
+            category_yoy.to_excel(writer, sheet_name="분류전년비교", index=False, startrow=2)
+            ws = writer.book["분류전년비교"]
+            style_title(ws, 1, category_yoy.shape[1], f"{month_label(latest)} 분류별 전년 비교")
+            apply_table_style(ws, 3, 3 + len(category_yoy), won_cols=[3,6,9], int_cols=[2,5,8], pct_cols=[4,7,10])
             auto_fit(ws)
-            ws.freeze_panes = "B4"
+            ws.freeze_panes = "A4"
 
-            for month in sorted(daily_df["기준월"].unique().tolist()):
-                ws_name = f"{int(month.split('-')[1])}월"
-                dm = daily_df[daily_df["기준월"] == month].copy()
-                detail = dm.groupby(["지점명","영업일자"], as_index=False).agg({"실매출액":"sum","전표건수":"sum","공급가액":"sum"})
-                detail["객단가"] = detail.apply(lambda r: pct(r["실매출액"], r["전표건수"]) if r["전표건수"] else 0, axis=1)
-                detail["영업일자"] = detail["영업일자"].dt.strftime("%Y-%m-%d")
-                detail = detail[["지점명","영업일자","실매출액","전표건수","객단가","공급가액"]]
-                detail.to_excel(writer, sheet_name=ws_name, index=False, startrow=2)
+        receipt_cmp.to_excel(writer, sheet_name="영수건수비교", index=False, startrow=2)
+        ws = writer.book["영수건수비교"]
+        style_title(ws, 1, receipt_cmp.shape[1], f"{month_label(latest)} 영수건수 비교")
+        apply_table_style(ws, 3, 3 + len(receipt_cmp), won_cols=[2,4], int_cols=[3,6])
+        auto_fit(ws)
+        ws.freeze_panes = "A4"
 
-                ws = writer.book[ws_name]
-                style_title(ws, 1, len(detail.columns), f"{month_label(month)} 운영자료")
-                apply_table_style(
-                    ws, 3, 3 + len(detail),
-                    won_cols=[3,5,6],
-                    int_cols=[4]
-                )
-                auto_fit(ws)
-                ws.freeze_panes = "A4"
+        payment_mix.to_excel(writer, sheet_name="결제수단분석", index=False, startrow=2)
+        ws = writer.book["결제수단분석"]
+        style_title(ws, 1, payment_mix.shape[1], f"{month_label(latest)} 결제수단 분석")
+        apply_table_style(ws, 3, 3 + len(payment_mix), won_cols=[2], pct_cols=[3])
+        auto_fit(ws)
+
+        # top bottom combined
+        row = 1
+        top5.to_excel(writer, sheet_name="상하위점포", index=False, startrow=row+2)
+        bottom5.to_excel(writer, sheet_name="상하위점포", index=False, startrow=row+2, startcol=7)
+        ws = writer.book["상하위점포"]
+        style_title(ws, 1, 11, f"{month_label(latest)} 상위/하위 점포")
+        style_section(ws, 3, 4, "상위 5개 점포", HEADER_BLUE)
+        style_section(ws, 3, 10, "하위 5개 점포", HEADER_YELLOW)
+        apply_table_style(ws, 4, 4 + len(top5), start_col=1, end_col=4, won_cols=[2,4], int_cols=[3], header_fill=HEADER_BLUE)
+        apply_table_style(ws, 4, 4 + len(bottom5), start_col=8, end_col=11, won_cols=[9,11], int_cols=[10], header_fill=HEADER_YELLOW)
+        auto_fit(ws)
+
     out.seek(0)
     return out.getvalue()
 
@@ -455,7 +426,7 @@ def make_designed_goodwill_sales(daily_df):
 # UI
 # -----------------------------
 st.title("굿윌 매출 리포트")
-st.caption("대시보드 조회 + 보고서형 엑셀 다운로드")
+st.caption("대시보드 분석 확대 + 참고 이미지 포함 보고서형 엑셀 다운로드")
 
 with st.sidebar:
     st.header("파일 업로드")
@@ -481,57 +452,78 @@ fm = month_store[(month_store["기준월"] == selected_month) & (month_store["�
 dm = daily_df[(daily_df["기준월"] == selected_month) & (daily_df["지점명"].isin(selected_stores))].copy()
 pm = product_df[(product_df["기준월"] == selected_month) & (product_df["지점명"].isin(selected_stores))].copy() if not product_df.empty else pd.DataFrame()
 
-# simple dashboard preview
 total_sales = fm["실매출액"].sum()
 total_cnt = fm["전표건수"].sum()
 avg_ticket = pct(total_sales, total_cnt)
 prev_sales = fm["전월실매출액"].fillna(0).sum() if "전월실매출액" in fm.columns else 0
 mom = pct(total_sales - prev_sales, prev_sales) if prev_sales else 0
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("실매출액", fmt_won(total_sales))
 c2.metric("전표건수", f"{total_cnt:,.0f}건")
 c3.metric("객단가", fmt_won(avg_ticket))
 c4.metric("전월대비", fmt_pct(mom))
+c5.metric("점포수", f"{fm['지점명'].nunique():,}개")
 
-tab1, tab2, tab3 = st.tabs(["미리보기", "월매출 분석자료", "엑셀 다운로드"])
+tab1, tab2, tab3, tab4 = st.tabs(["요약", "지점 분석", "상품/기증처", "엑셀 다운로드"])
 
 with tab1:
-    st.subheader("지점별 실매출 비교")
-    st.bar_chart(fm[["지점명","실매출액"]].sort_values("실매출액", ascending=False).set_index("지점명"))
-    st.subheader("선택월 요약")
-    st.dataframe(fm[["지점명","실매출액","전표건수","객단가","전월대비증감률"]], use_container_width=True, hide_index=True)
+    left, right = st.columns([1.3,1])
+    with left:
+        st.subheader("월별 실매출 추이")
+        trend = month_store[month_store["지점명"].isin(selected_stores)].groupby("기준월", as_index=False)["실매출액"].sum()
+        st.line_chart(trend.set_index("기준월")["실매출액"])
+        st.subheader("일별 실매출 추이")
+        daily_trend = dm.groupby("영업일자", as_index=False)["실매출액"].sum().sort_values("영업일자")
+        st.area_chart(daily_trend.set_index("영업일자")["실매출액"])
+    with right:
+        st.subheader("결제수단 비중")
+        pay = payment_mix_table(dm)
+        if not pay.empty:
+            st.dataframe(pay, use_container_width=True, hide_index=True)
+        st.subheader("상위 / 하위 점포")
+        top5, bottom5 = top_bottom_stores_table(month_store, selected_month)
+        a, b = st.columns(2)
+        a.write("상위 5개")
+        a.dataframe(top5, use_container_width=True, hide_index=True)
+        b.write("하위 5개")
+        b.dataframe(bottom5, use_container_width=True, hide_index=True)
 
 with tab2:
+    st.subheader("지점별 성과")
+    view = fm[["지점명","실매출액","전표건수","객단가","전월대비증감률"]].sort_values("실매출액", ascending=False).copy()
+    st.dataframe(view, use_container_width=True, hide_index=True)
+    st.subheader("영수건수 기준 비교")
+    st.dataframe(receipt_comparison_table(month_store, selected_month), use_container_width=True, hide_index=True)
+
+with tab3:
     if pm.empty:
-        st.info("상품별 파일을 업로드하면 분류별/기증처별 분석이 생성됩니다.")
+        st.info("상품별 파일을 업로드하면 분류별, 기증처별, 전년 비교가 표시됩니다.")
     else:
         class_df = build_classification_report(pm)
         donor_df = build_donor_report(pm)
-        st.markdown("#### 분류별 현황")
-        st.dataframe(class_df, use_container_width=True, hide_index=True)
-        st.markdown("#### 주요 기증처별 현황")
-        st.dataframe(donor_df, use_container_width=True, hide_index=True)
+        yoy = category_yoy_table(product_df, selected_month)
 
-with tab3:
-    st.subheader("보고서형 엑셀 다운로드")
-    month_bytes = make_designed_month_analysis(product_df)
-    sales_bytes = make_designed_goodwill_sales(daily_df)
+        a, b = st.columns(2)
+        with a:
+            st.subheader("분류별 매출 구성")
+            st.bar_chart(class_df.groupby("분류그룹", as_index=False)["실매출액"].sum().set_index("분류그룹"))
+            st.dataframe(class_df, use_container_width=True, hide_index=True)
+        with b:
+            st.subheader("주요 기증처 매출")
+            st.bar_chart(donor_df.groupby("기증처", as_index=False)["실매출액"].sum().set_index("기증처"))
+            st.dataframe(donor_df, use_container_width=True, hide_index=True)
 
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button(
-            "디자인 적용 월매출분석자료.xlsx",
-            data=month_bytes,
-            file_name="디자인적용_월매출분석자료.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        st.caption("제목/섹션/헤더색/테두리/합계강조/숫자포맷 적용")
-    with d2:
-        st.download_button(
-            "디자인 적용 굿윌매출자료.xlsx",
-            data=sales_bytes,
-            file_name="디자인적용_굿윌매출자료.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        st.caption("월합계/월별운영자료에 동일한 디자인 적용")
+        st.subheader("분류별 전년 비교")
+        st.dataframe(yoy, use_container_width=True, hide_index=True)
+
+with tab4:
+    st.subheader("보고서형 엑셀")
+    report_bytes = make_report_book(product_df, daily_df)
+    st.download_button(
+        "확장분석_보고서형_엑셀.xlsx",
+        data=report_bytes,
+        file_name="확장분석_보고서형_엑셀.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    st.caption("참고양식 이미지 시트 포함, 요약대시보드/분류전년비교/영수건수비교/결제수단분석/상하위점포 시트 생성")
