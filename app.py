@@ -21,7 +21,7 @@ MONTH_PATTERNS = [
 DAILY_NUM_COLS = ["전표건수","객단가","공급가액","실매출액","현금","현금영수증","카드","포인트","현금카드외","제휴포인트","상품권결제"]
 PRODUCT_NUM_COLS = ["판매수량","공급가액","실매출액","기본단가","이익금액","현금","현금영수증","카드","상품권결제","현금카드외"]
 
-MAJOR_DONORS = ["CJ제일제당","편의점","모던하우스","오뚜기","신세계푸드"]
+FIXED_DONORS = ["CJ제일제당","편의점","모던하우스","오뚜기","신세계푸드"]
 DONOR_PATTERNS = {
     "CJ제일제당": [r"CJ제일제당", r"\bCJ\b"],
     "편의점": [r"GS25", r"\bCU\b", r"세븐일레븐", r"편의점"],
@@ -32,10 +32,7 @@ DONOR_PATTERNS = {
 CATEGORY_ORDER = ["의류","잡화","생활","식품","건강/미용","문화","원가상품","기타"]
 
 TITLE_FILL = PatternFill("solid", fgColor="1F1F1F")
-SECTION_FILL = PatternFill("solid", fgColor="D9E2F3")
 HEADER_FILL = PatternFill("solid", fgColor="E2F0D9")
-HEADER_BLUE = PatternFill("solid", fgColor="DDEBF7")
-HEADER_YELLOW = PatternFill("solid", fgColor="FFF2CC")
 WHITE_FONT = Font(color="FFFFFF", bold=True, size=14)
 BOLD_FONT = Font(bold=True)
 THIN = Side(style="thin", color="BFBFBF")
@@ -155,13 +152,6 @@ def infer_donor(row):
         for p in patterns:
             if re.search(p, text, re.IGNORECASE):
                 return donor
-    if "》" in str(row.get("상품분류","")):
-        parts = [x.strip() for x in str(row.get("상품분류","")).split("》")]
-        if len(parts) >= 2:
-            second = parts[1]
-            blacklist = {"여성의류","남성의류","아동의류","하의","상의","가방","신발","잡화","문화용품","도서","생활용품","주방용품","가전","건강/미용","기업","식품","매입","제빵"}
-            if second not in blacklist and len(second) >= 2:
-                return second
     return "기타"
 
 def parse_product_sales(uploaded_file):
@@ -239,26 +229,28 @@ def build_classification_report(product_month):
     grp["정렬"] = grp["분류그룹"].apply(lambda x: CATEGORY_ORDER.index(x) if x in CATEGORY_ORDER else 999)
     return grp.sort_values(["지점명","정렬"]).drop(columns=["정렬","지점합계"])
 
-def build_donor_report(product_month):
+def build_fixed_donor_report(product_month):
+    base = pd.MultiIndex.from_product(
+        [sorted(product_month["지점명"].dropna().unique().tolist()) if not product_month.empty else [],
+         FIXED_DONORS],
+        names=["지점명","기증처"]
+    ).to_frame(index=False)
+
     if product_month.empty:
-        return pd.DataFrame(columns=["지점명","기증처","판매수량","실매출액","피스단가"])
-    grp = product_month.groupby(["지점명","기증처"], as_index=False).agg({"판매수량":"sum","실매출액":"sum"})
-    grp["피스단가"] = grp.apply(lambda r: pct(r["실매출액"], r["판매수량"]) if r["판매수량"] else 0, axis=1)
-    base = grp[grp["기증처"].isin(MAJOR_DONORS)].copy()
-    extra = (
-        grp[~grp["기증처"].isin(MAJOR_DONORS)]
-        .groupby("기증처", as_index=False)["실매출액"].sum()
-        .sort_values("실매출액", ascending=False)
-        .head(5)
-    )
-    extra_names = extra["기증처"].tolist()
-    extra_df = grp[grp["기증처"].isin(extra_names)].copy()
-    out = pd.concat([base, extra_df], ignore_index=True)
-    if out.empty:
-        return pd.DataFrame(columns=["지점명","기증처","판매수량","실매출액","피스단가"])
-    total_order = out.groupby("기증처", as_index=False)["실매출액"].sum().sort_values("실매출액", ascending=False)["기증처"].tolist()
-    out["기증처"] = pd.Categorical(out["기증처"], categories=total_order, ordered=True)
-    return out.sort_values(["기증처","지점명"])
+        if base.empty:
+            return pd.DataFrame(columns=["지점명","기증처","판매수량","실매출액","피스단가"])
+        base["판매수량"] = 0.0
+        base["실매출액"] = 0.0
+        base["피스단가"] = 0.0
+        return base
+
+    grp = product_month[product_month["기증처"].isin(FIXED_DONORS)].groupby(["지점명","기증처"], as_index=False).agg({
+        "판매수량":"sum","실매출액":"sum"
+    })
+    result = base.merge(grp, on=["지점명","기증처"], how="left").fillna(0)
+    result["피스단가"] = result.apply(lambda r: pct(r["실매출액"], r["판매수량"]) if r["판매수량"] else 0, axis=1)
+    result["기증처"] = pd.Categorical(result["기증처"], categories=FIXED_DONORS, ordered=True)
+    return result.sort_values(["기증처","지점명"])
 
 def category_yoy_table(product_df, month):
     current = build_classification_report(product_df[product_df["기준월"] == month].copy())
@@ -290,18 +282,6 @@ def category_yoy_table(product_df, month):
     merged = merged.rename(columns={"분류그룹":"구분"})
     merged["정렬"] = merged["구분"].apply(lambda x: CATEGORY_ORDER.index(x) if x in CATEGORY_ORDER else 999)
     return merged.sort_values("정렬").drop(columns=["정렬"])
-
-def receipt_comparison_table(month_store, month):
-    y, m = month.split("-")
-    prev = f"{int(y)-1:04d}-{m}"
-    curr = month_store[month_store["기준월"] == month].copy()
-    prev_df = month_store[month_store["기준월"] == prev].copy()
-    merged = curr.merge(prev_df[["지점명","실매출액","전표건수","객단가"]], on="지점명", how="left", suffixes=("_당해","_전년"))
-    merged["연도"] = int(y)
-    merged["영수건수 증가수"] = merged["전표건수_당해"] - merged["전표건수_전년"].fillna(0)
-    out = merged[["지점명","실매출액_당해","전표건수_당해","객단가_당해","연도","영수건수 증가수"]].copy()
-    out.columns = ["매장","총매출","영수건수","객단가","연도","영수건수 증가수"]
-    return out.sort_values("총매출", ascending=False)
 
 def payment_mix_table(daily_month):
     cols = ["현금","현금영수증","카드","포인트","현금카드외","제휴포인트","상품권결제"]
@@ -336,44 +316,40 @@ def make_report_book(product_df, daily_df):
             img.height = 1400
             ws_ref.add_image(img, "A3")
 
-        if not months:
-            out.seek(0)
-            return out.getvalue()
-
-        latest = months[-1]
-        yoy = category_yoy_table(product_df, latest)
-        payment = payment_mix_table(daily_df[daily_df["기준월"] == latest].copy())
-        receipt = receipt_comparison_table(month_store, latest)
-
-        if not yoy.empty:
-            yoy.to_excel(writer, sheet_name="분류전년비교", index=False, startrow=2)
-            ws = writer.book["분류전년비교"]
-            style_title(ws, 1, yoy.shape[1], f"{month_label(latest)} 분류별 전년 비교")
-            pct_cols = [4,7,10]
-            won_cols = [3,6,9]
-            int_cols = [2,5,8]
-            apply_table_style(ws, 3, 3 + len(yoy), pct_cols=pct_cols, won_cols=won_cols, int_cols=int_cols)
-            auto_fit(ws)
-            ws.freeze_panes = "A4"
-
-        if not payment.empty:
-            payment.to_excel(writer, sheet_name="결제수단분석", index=False, startrow=2)
-            ws = writer.book["결제수단분석"]
-            style_title(ws, 1, payment.shape[1], f"{month_label(latest)} 결제수단 분석")
-            apply_table_style(ws, 3, 3 + len(payment), pct_cols=[3], won_cols=[2])
-            auto_fit(ws)
-
-        if not receipt.empty:
-            receipt.to_excel(writer, sheet_name="영수건수비교", index=False, startrow=2)
-            ws = writer.book["영수건수비교"]
-            style_title(ws, 1, receipt.shape[1], f"{month_label(latest)} 영수건수 비교")
-            apply_table_style(ws, 3, 3 + len(receipt), won_cols=[2,4], int_cols=[3,6])
-            auto_fit(ws)
+        if months:
+            latest = months[-1]
+            payment = payment_mix_table(daily_df[daily_df["기준월"] == latest].copy())
+            if not payment.empty:
+                payment.to_excel(writer, sheet_name="결제수단분석", index=False, startrow=2)
+                ws = writer.book["결제수단분석"]
+                style_title(ws, 1, payment.shape[1], f"{month_label(latest)} 결제수단 분석")
+                apply_table_style(ws, 3, 3 + len(payment), pct_cols=[3], won_cols=[2])
+                auto_fit(ws)
     out.seek(0)
     return out.getvalue()
 
+st.markdown("""
+<style>
+.kpi-box {
+    background: #f7f8fb;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 14px 16px;
+}
+.kpi-title {font-size: 13px; color: #6b7280;}
+.kpi-value {font-size: 28px; font-weight: 700; margin-top: 4px;}
+.section-box {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 12px 14px;
+    height: 100%;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("굿윌 매출 리포트")
-st.caption("키 에러 수정 + 점유율 퍼센트 표시 적용")
+st.caption("요약 대시보드 강화 + 기증처 5개 고정")
 
 with st.sidebar:
     st.header("파일 업로드")
@@ -405,63 +381,118 @@ avg_ticket = pct(total_sales, total_cnt)
 prev_sales = fm["전월실매출액"].fillna(0).sum() if "전월실매출액" in fm.columns else 0
 mom = pct(total_sales - prev_sales, prev_sales) if prev_sales else 0
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("실매출액", fmt_won(total_sales))
-c2.metric("전표건수", f"{total_cnt:,.0f}건")
-c3.metric("객단가", fmt_won(avg_ticket))
-c4.metric("전월대비", fmt_pct(mom))
-c5.metric("점포수", f"{fm['지점명'].nunique():,}개")
+k1, k2, k3, k4, k5 = st.columns(5)
+for col, title, value in [
+    (k1, "실매출액", fmt_won(total_sales)),
+    (k2, "전표건수", f"{total_cnt:,.0f}건"),
+    (k3, "객단가", fmt_won(avg_ticket)),
+    (k4, "전월대비", fmt_pct(mom)),
+    (k5, "점포수", f"{fm['지점명'].nunique():,}개"),
+]:
+    with col:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-title">{title}</div><div class="kpi-value">{value}</div></div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["요약", "상품/기증처", "엑셀 다운로드"])
+tab1, tab2, tab3 = st.tabs(["요약 대시보드", "상품/기증처", "엑셀 다운로드"])
 
 with tab1:
-    st.subheader("결제수단 비중")
+    top5, bottom5 = top_bottom_stores_table(month_store, selected_month)
     pay = payment_mix_table(dm).copy()
-    if not pay.empty:
-        pay_show = pay.copy()
-        pay_show["금액"] = pay_show["금액"].map(fmt_won)
-        pay_show["점유율"] = pay_show["점유율"].map(fmt_pct)
-        st.dataframe(pay_show, use_container_width=True, hide_index=True)
+
+    row1_col1, row1_col2 = st.columns([1.4, 1])
+    with row1_col1:
+        st.markdown('<div class="section-box">', unsafe_allow_html=True)
+        st.subheader("월별 실매출 추이")
+        trend = month_store[month_store["지점명"].isin(selected_stores)].groupby("기준월", as_index=False)["실매출액"].sum()
+        st.line_chart(trend.set_index("기준월")["실매출액"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with row1_col2:
+        st.markdown('<div class="section-box">', unsafe_allow_html=True)
+        st.subheader("결제수단 비중")
+        if not pay.empty:
+            pay_show = pay.copy()
+            pay_show["금액"] = pay_show["금액"].map(fmt_won)
+            pay_show["점유율"] = pay_show["점유율"].map(fmt_pct)
+            st.dataframe(pay_show, use_container_width=True, hide_index=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        st.markdown('<div class="section-box">', unsafe_allow_html=True)
+        st.subheader("매출 상위 5개 매장")
+        top_show = top5.copy()
+        if not top_show.empty:
+            top_show["실매출액"] = top_show["실매출액"].map(fmt_won)
+            top_show["객단가"] = top_show["객단가"].map(fmt_won)
+            top_show["전표건수"] = top_show["전표건수"].map(lambda x: f"{x:,.0f}건")
+            st.dataframe(top_show, use_container_width=True, hide_index=True)
+        st.bar_chart(top5.set_index("지점명")["실매출액"] if not top5.empty else pd.Series(dtype=float))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with row2_col2:
+        st.markdown('<div class="section-box">', unsafe_allow_html=True)
+        st.subheader("매출 하위 5개 매장")
+        bottom_show = bottom5.copy()
+        if not bottom_show.empty:
+            bottom_show["실매출액"] = bottom_show["실매출액"].map(fmt_won)
+            bottom_show["객단가"] = bottom_show["객단가"].map(fmt_won)
+            bottom_show["전표건수"] = bottom_show["전표건수"].map(lambda x: f"{x:,.0f}건")
+            st.dataframe(bottom_show, use_container_width=True, hide_index=True)
+        st.bar_chart(bottom5.set_index("지점명")["실매출액"] if not bottom5.empty else pd.Series(dtype=float))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-box">', unsafe_allow_html=True)
+    st.subheader("지점별 성과 요약")
+    summary = fm[["지점명","실매출액","전표건수","객단가","전월대비증감률"]].sort_values("실매출액", ascending=False).copy()
+    summary["실매출액"] = summary["실매출액"].map(fmt_won)
+    summary["전표건수"] = summary["전표건수"].map(lambda x: f"{x:,.0f}건")
+    summary["객단가"] = summary["객단가"].map(fmt_won)
+    summary["전월대비증감률"] = summary["전월대비증감률"].map(fmt_pct)
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with tab2:
     if pm.empty:
-        st.info("상품별 파일을 업로드하면 분류별, 기증처별, 전년 비교가 표시됩니다.")
+        st.info("상품별 파일을 업로드하면 분류별, 기증처별 분석이 표시됩니다.")
     else:
         class_df = build_classification_report(pm).copy()
-        donor_df = build_donor_report(pm).copy()
+        donor_df = build_fixed_donor_report(pm).copy()
         yoy = category_yoy_table(product_df, selected_month).copy()
 
-        if not class_df.empty:
+        left, right = st.columns(2)
+        with left:
+            st.subheader("분류별 매출 구성")
+            class_chart = class_df.groupby("분류그룹", as_index=False)["실매출액"].sum().set_index("분류그룹")
+            st.bar_chart(class_chart)
             class_show = class_df.copy()
             class_show["실매출액"] = class_show["실매출액"].map(fmt_won)
             class_show["점유율"] = class_show["점유율"].map(fmt_pct)
-            st.subheader("분류별 매출 구성")
             st.dataframe(class_show, use_container_width=True, hide_index=True)
 
-        if not donor_df.empty:
+        with right:
+            st.subheader("고정 기증처 5개 매출")
+            donor_chart = donor_df.groupby("기증처", as_index=False)["실매출액"].sum().set_index("기증처")
+            st.bar_chart(donor_chart)
             donor_show = donor_df.copy()
             donor_show["실매출액"] = donor_show["실매출액"].map(fmt_won)
             donor_show["피스단가"] = donor_show["피스단가"].map(fmt_won)
-            st.subheader("주요 기증처 매출")
             st.dataframe(donor_show, use_container_width=True, hide_index=True)
 
+        st.subheader("분류별 전년 비교")
         if not yoy.empty:
             yoy_show = yoy.copy()
             for col in ["점유율_당해","점유율_전년","점유율_차이"]:
-                if col in yoy_show.columns:
-                    yoy_show[col] = yoy_show[col].map(fmt_pct)
+                yoy_show[col] = yoy_show[col].map(fmt_pct)
             for col in ["실매출액_당해","실매출액_전년","실매출액_차이"]:
-                if col in yoy_show.columns:
-                    yoy_show[col] = yoy_show[col].map(fmt_won)
-            st.subheader("분류별 전년 비교")
+                yoy_show[col] = yoy_show[col].map(fmt_won)
             st.dataframe(yoy_show, use_container_width=True, hide_index=True)
 
 with tab3:
     report_bytes = make_report_book(product_df, daily_df)
     st.download_button(
-        "수정본_보고서형_엑셀.xlsx",
+        "v7_보고서형_엑셀.xlsx",
         data=report_bytes,
-        file_name="수정본_보고서형_엑셀.xlsx",
+        file_name="v7_보고서형_엑셀.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    st.caption("키 에러 수정, 점유율 퍼센트 포맷 적용")
+    st.caption("참고양식 이미지 포함, 기증처 5개 고정")
